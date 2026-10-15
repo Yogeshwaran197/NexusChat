@@ -105,5 +105,13 @@ def guardrail_node(state : AgentState) -> Dict:
     }
 
 
+def guardrail_should_continue(state : AgentState) -> Dict:
 
+    guardrail = state["guardrail"]
+
+    if guardrail:
+        return "ground_query"
+    else:
+        return "End"
+    
 
