@@ -1,3 +1,4 @@
+from email import message
 from ast import Dict
 import os
 import psycopg
@@ -32,8 +33,9 @@ class AgentState(TypedDict):
 
     original_query : str
     query : str
-    messages : Annotated[Sequence[str], add_messages]
+    generation : str
     websearch : bool
+    websearch_context: str
     validate_query : bool
     grounded_answer : bool
     guardrail : bool
@@ -50,7 +52,7 @@ class llm_ground_answer(BaseModel):
 
     grounded : Literal["yes", "no"] = Field(
         ...,
-        description="'yes' if every claim in the answer is supported by the provided search results, 'no' if any part is unsupported or made up."
+        description="'yes' if the generated answer directly and accurately addresses the user's query, 'no' if it is irrelevant or fails to answer the query."
         
     )
 
@@ -149,15 +151,18 @@ def ground_query(state : AgentState) -> Dict:
         validate_query = True
     else:
         validate_query = False
+ 
 
     return {
-        "validate_query" : validate_query
+        "validate_query" : validate_query,
+        "query" : query
     }
 
 
 def query_checker_should_continue(state : AgentState) -> Dict:
 
     validate_query = state["validate_query"]
+    query = state["orignal_query"]
 
     if validate_query:
         return "query_rewriter"
@@ -165,7 +170,148 @@ def query_checker_should_continue(state : AgentState) -> Dict:
         return "generation"
 
 
+def rewriter_query(state : AgentState) -> Dict:
 
+    system = """You are a query rewriter for a chatbot. The user's latest query was flagged as vague or incomplete. Rewrite it into a clear, specific, standalone query that can be understood and answered without the chat history.
+
+        Rules:
+        - Use the chat history to resolve references like "it", "they", "that one", or "tell me more".
+        - Fix spelling and grammar mistakes.
+        - Keep the user's original intent. Do not add new topics, details, or assumptions.
+        - Keep it concise, ideally one sentence.
+        - If the query is already clear, return it unchanged.
+
+        Return only the rewritten query. Do not answer it or add explanations."""
+
+    
+    query = state["original_query"]
+
+    prompt =  ChatPromptTemplate.from_messages([
+        ("system", system),
+        ("human", "query : {query}")
+    ])
+
+    chain = prompt | llm | StrOutputParser()
+
+    response = chain.invoke({
+        "query" : query
+        }
+    )
+    return {
+        "query" : response
+    }
+
+
+
+def generation(state : AgentState) -> Dict :
+
+
+    system = """
+        You are a helpful assistant for a NexusChat.
+
+        Rules:
+        - If the provided context is empty or contains no useful information, answer the user's query using your own knowledge and the chat history.
+        - If the context contains relevant information, answer using only the provided context and chat history. Do not add facts from your own knowledge or make anything up.
+        - If the context is available but does not contain enough information to answer the query, explain what information is missing. Do not fill the gaps using your own knowledge.
+        - Be clear and concise. Use short paragraphs or bullet points when helpful.
+        - Cite sources by name or URL when the context provides them.
+        - Keep a friendly, natural tone.
+
+        Context:
+        {context}
+
+        Query:
+        {query}
+    """
+
+    query =  state["query"]
+    context = state["websearch_context"]
+
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system),
+        ("human", "\n\n query: {query} \n\n context: {context}")
+    ])
+
+    chain = prompt | llm | StrOutputParser
+
+    response = chain.invoke({
+        "query" : query,
+        "context" : context
+    })
+
+
+    return {
+        "generation" : response
+    }
+
+
+grounded_llm = llm.with_structured_output(grounded_answer)
+
+def grounded_answer(state : AgentState) -> Dict:
+
+    query = state['original_query']
+    generated_answer = state["generation"]
+  
+    system  = """
+        You are a grader that evaluates whether the generated answer is grounded
+        in the user's query.
+
+        Check whether the generated answer is relevant to the query and directly
+        addresses what the user asked. Penalize irrelevant information, unsupported
+        assumptions about the user's intent, and answers that do not match the query.
+
+        Query:
+        {query}
+
+        Generated Answer:
+        {answer}
+    """
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system),
+        ("human", "\n\n query: {query} \n\n answer : {generated_answer}")
+    ])
+
+    chain = prompt | llm | StrOutputParser
+
+    response = chain.invoke({
+        "query" : query,
+        "context" : generated_answer
+    })
+
+    if response.lm_ground_answer == "yes":
+        websearch = False
+    else :
+        websearch = True
+    
+    return {
+        "websearch" : websearch
+    }
+
+
+def grounded_should_continue(state : AgentState) -> AgentState:
+
+    websearch = state["websearch"]
+
+    if websearch:
+        return "websearch"
+    else :
+        return "end"
+
+    
+
+
+
+
+
+
+
+
+
+
+
+    
 
 
 
