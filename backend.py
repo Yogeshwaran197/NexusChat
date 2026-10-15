@@ -1,5 +1,4 @@
-from email import message
-from ast import Dict
+import asyncio
 import os
 import psycopg
 from dotenv import load_dotenv
@@ -13,8 +12,10 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.postgres import PostgresSaver
 from psycopg import connect
 from psycopg.rows import dict_row
-from typing import TypedDict, List, Sequence, Annotated, Literal
+from typing import TypedDict, List, Sequence, Annotated, Literal, Dict
 from pydantic import BaseModel, Field
+from mcp_client import tavily_search
+
 
 load_dotenv()
 
@@ -216,6 +217,7 @@ def generation(state : AgentState) -> Dict :
         - Be clear and concise. Use short paragraphs or bullet points when helpful.
         - Cite sources by name or URL when the context provides them.
         - Keep a friendly, natural tone.
+        - if user cancelled websearch return 'user cancelled webseach' 
 
         Context:
         {context}
@@ -300,7 +302,34 @@ def grounded_should_continue(state : AgentState) -> AgentState:
         return "end"
 
     
+def websearch(state : AgentState):
 
+    query = state["query"]
+
+    decision = interrupt({
+        "action" : "Web Search",
+        "query" : query,
+        "approval" : "allow web search?"
+    })
+
+    if decision.strip().lower() != "y" :
+        return {
+            "websearch" : False,
+            "generation" : "Web search is cancelled by user, return no answer"
+        }
+    
+    else:
+        result = asyncio.run(tavily_search(query))
+    
+    return {
+        "websearch_context" : result
+    }
+
+
+
+
+    
+    
 
 
 
