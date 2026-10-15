@@ -1,0 +1,18 @@
+# Core LangChain
+langchain
+langchain-core
+langchain-groq
+
+# Agent graph + memory
+langgraph
+langgraph-checkpoint-postgres
+
+# MCP (web search tool)
+langchain-mcp-adapters
+mcp
+
+# Postgres driver (needed by the checkpointer)
+psycopg[binary,pool]
+
+# Utilities
+python-dotenv
