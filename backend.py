@@ -1,3 +1,4 @@
+from ast import Dict
 import os
 import psycopg
 from dotenv import load_dotenv
@@ -51,4 +52,14 @@ class llm_ground_answer(BaseModel):
         description="'yes' if every claim in the answer is supported by the provided search results, 'no' if any part is unsupported or made up."
         
     )
+
+def llm_guardrails(BaseModel):
+
+    guard : Literal["yes", "no"] = Field(
+        ...,
+        description="'yes' if the query is safe and appropriate to answer, 'no' if it should be blocked."
+    )
+
+
+
 
