@@ -65,7 +65,7 @@ guardrail_llm =  llm.with_structured_output(llm_guardrails)
 
 def guardrail_node(state : AgentState) -> Dict:
 
-    query = state["query"]
+    query = state["original_query"]
 
     system = """
     You are a guardrail for a chatbot. Review the user's query and decide whether it is safe and appropriate to answer.
@@ -114,4 +114,64 @@ def guardrail_should_continue(state : AgentState) -> Dict:
     else:
         return "End"
     
+
+query_checker_llm = llm.with_structured_output(llm_validate_query)
+
+def ground_query(state : AgentState) -> Dict:
+
+    query = state['original_query']
+
+    system = """You are a query checker for a chatbot. Decide whether the user's latest query is clear and complete enough to generate an answer as-is, or whether it must be rewritten first.
+
+            Needs rewriting if the query:
+            - is vague or incomplete (e.g. "tell me more", "what about that?")
+            - depends on earlier chat history to make sense (pronouns like "it", "they", "that one")
+            - is missing key details needed to answer or search properly
+            - has heavy spelling or grammar errors that hide the meaning
+
+            Clear enough if the query is specific, self-contained, and understandable on its own.
+
+            Use the chat history only to judge whether the query depends on it. Do not answer the query or rewrite it.
+        """ 
+
+    prompt =  ChatPromptTemplate.from_messages([
+        ("system", system),
+        ("human", "query : {query}")
+    ])
+
+    chain =  prompt | query_checker_llm
+
+    response = chain.invoke({
+        "query" : query
+    })
+
+    if response.needs_rewrite_query == "yes":
+        validate_query = True
+    else:
+        validate_query = False
+
+    return {
+        "validate_query" : validate_query
+    }
+
+
+def query_checker_should_continue(state : AgentState) -> Dict:
+
+    validate_query = state["validate_query"]
+
+    if validate_query:
+        return "query_rewriter"
+    else:
+        return "generation"
+
+
+
+
+
+
+
+    
+    
+
+
 
