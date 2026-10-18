@@ -1,6 +1,8 @@
+from uuid import uuid4
 import asyncio
 import os
 import psycopg
+import uuid
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
@@ -17,12 +19,25 @@ from pydantic import BaseModel, Field
 from mcp_client import tavily_search
 
 
+
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("TAVILY API, Invalid API key, give right one")
 
+def get_database_url():
+    DATABASE_URL =  os.getenv("DATABASE_URL")
+
+    if not DATABASE_URL:
+        raise ValueError("Invalid database url, need valid database url")
+
+    
+    if "sslmode" not in DATABASE_URL:
+        seperator = "&" if  "?" in DATABASE_URL else "?"
+        DATABASE_URL = f"{DATABASE_URL}{seperator}sslmode=require"
+
+    return DATABASE_URL
 
 llm =  ChatGroq(
     model = "openai/gpt-oss-120b",
@@ -327,14 +342,101 @@ def websearch(state : AgentState):
 
 
 
+graph = StateGraph(AgentState)
 
+graph.add_node("guardrail", guardrail_node)
+graph.add_node("query_check", ground_query)
+graph.add_node("rewriter", rewriter_query)
+graph.add_node("generate",  generation)
+graph.add_node("grounded", grounded_answer)
+graph.add_node("web_search", websearch)
+
+
+graph.add_edge(START, "guardrail")
+graph.add_conditional_edges(
+    "guardrail",
+    guardrail_should_continue,
+    {
+        "ground_query" : "query_check",
+        "End" : END
+    }
+    )
+graph.add_conditional_edges(
+    "query_check",
+    query_checker_should_continue,
+    {
+        "query_rewriter" : "rewriter",
+         "generation" : "generate"
+    }
+)
+graph.add_edge("rewriter" , "generate")
+graph.add_conditional_edges(
+    "generate",
+    grounded_should_continue,
+    {
+        "websearch" : "web_search",
+        "end" : END
+    }
+)
+
+
+
+database_url =  get_database_url()
+
+conn = psycopg.connect(
+    database_url,
+    row_factory= dict_row,
+    autocommit=True
+)
+
+checkpointer = PostgresSaver(
+    conn
+)
+checkpointer.setup()
+
+Nexus = graph.compile(checkpointer = checkpointer)
+
+
+if  __name__ == "__main__":
+
+    while True:
+        user_input =  input("Ask Anything : ")
+        if user_input.strip().lower() == "exit" or "end":
+            break
     
-    
+        
+        inputs = {
+            "original_query" : user_input,
+            "query" : user_input,
+            "generation" : "",
+            "websearch" : False,
+            "websearch_context" : "",
+            "validate_query" : False,
+            "grounded_answer" : False,
+            "guardrail" : False,
+        }
 
+        config = {"configurable" :{
+            "thread_id" : str(uuid.uuid4())
+            }
+        }
 
+        while True:
 
+            result = Nexus.invoke( 
+                input=inputs ,
+                config=config
+            )
 
+            if "__interrupt" not in result:
+                print(f"/n {result["generation"]}")
+                break
+            
 
+            interrupt_payload =  result["__interrupt__"][0].value
+            print(f"Allow for {interrupt_payload}?")
+            choice = input("Y/N Allow WebSearch?")
+            inputs = Command(resume=choice)
 
 
 
