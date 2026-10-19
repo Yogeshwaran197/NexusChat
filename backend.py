@@ -1,8 +1,9 @@
-from uuid import uuid4
+from langgraph.graph import state
+import uuid
 import asyncio
 import os
 import psycopg
-import uuid
+from datetime import date
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
@@ -17,7 +18,8 @@ from psycopg.rows import dict_row
 from typing import TypedDict, List, Sequence, Annotated, Literal, Dict
 from pydantic import BaseModel, Field
 from mcp_client import tavily_search
-
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 
 load_dotenv()
@@ -25,6 +27,7 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("TAVILY API, Invalid API key, give right one")
+
 
 def get_database_url():
     DATABASE_URL =  os.getenv("DATABASE_URL")
@@ -40,13 +43,14 @@ def get_database_url():
     return DATABASE_URL
 
 llm =  ChatGroq(
-    model = "openai/gpt-oss-120b",
+    model = "qwen/qwen3.8-27b",
     api_key=GROQ_API_KEY
 )
 
 
 class AgentState(TypedDict):
 
+    messages: Annotated[list[BaseMessage], add_messages]
     original_query : str
     query : str
     generation : str
@@ -55,6 +59,8 @@ class AgentState(TypedDict):
     validate_query : bool
     grounded_answer : bool
     guardrail : bool
+    web_search_done: bool
+    web_search_cancelled: bool
 
 
 class llm_validate_query(BaseModel):
@@ -72,7 +78,7 @@ class llm_ground_answer(BaseModel):
         
     )
 
-def llm_guardrails(BaseModel):
+class llm_guardrails(BaseModel):
 
     guard : Literal["yes", "no"] = Field(
         ...,
@@ -178,7 +184,6 @@ def ground_query(state : AgentState) -> Dict:
 def query_checker_should_continue(state : AgentState) -> Dict:
 
     validate_query = state["validate_query"]
-    query = state["orignal_query"]
 
     if validate_query:
         return "query_rewriter"
@@ -204,20 +209,26 @@ def rewriter_query(state : AgentState) -> Dict:
 
     prompt =  ChatPromptTemplate.from_messages([
         ("system", system),
-        ("human", "query : {query}")
+        MessagesPlaceholder("history"),
+        ("human", "query : {query}"),
     ])
 
     chain = prompt | llm | StrOutputParser()
 
     response = chain.invoke({
-        "query" : query
-        }
-    )
+    "query": query,
+    "history": get_history(state),
+    })
+
     return {
         "query" : response
     }
 
 
+def get_history(state: AgentState):
+    msgs = state["messages"]
+    last_human = max(i for i, m in enumerate(msgs) if isinstance(m, HumanMessage))
+    return msgs[:last_human]
 
 def generation(state : AgentState) -> Dict :
 
@@ -247,97 +258,92 @@ def generation(state : AgentState) -> Dict :
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system),
-        ("human", "\n\n query: {query} \n\n context: {context}")
+        MessagesPlaceholder("history"),
+        ("human", "{query}")
     ])
 
-    chain = prompt | llm | StrOutputParser
+    chain = prompt | llm | StrOutputParser()
 
     response = chain.invoke({
         "query" : query,
-        "context" : context
+        "context" : context,
+        "history": get_history(state)
     })
 
 
     return {
-        "generation" : response
+        "generation" : response,
+        "messages": [AIMessage(content=response)],
     }
 
 
-grounded_llm = llm.with_structured_output(grounded_answer)
+grounded_llm = llm.with_structured_output(llm_ground_answer)
 
-def grounded_answer(state : AgentState) -> Dict:
+def grounded_answer(state: AgentState) -> Dict:
 
-    query = state['original_query']
-    generated_answer = state["generation"]
-  
-    system  = """
-        You are a grader that evaluates whether the generated answer is grounded
-        in the user's query.
+    system = f"""You are a grader deciding whether a web search is needed.
+    Today's date is {date.today().isoformat()}. The assistant's own knowledge
+    is outdated and ends before this date.
 
-        Check whether the generated answer is relevant to the query and directly
-        addresses what the user asked. Penalize irrelevant information, unsupported
-        assumptions about the user's intent, and answers that do not match the query.
+    Answer 'no' (search needed) if the QUERY asks about anything that changes over time:
+    news, ongoing events or wars, "current" or "latest" or "today" situations,
+    prices, scores, elections, who holds a role now, recent releases.
+    Do this even if the answer sounds confident, because it may be stale.
 
-        Query:
-        {query}
+    Answer 'yes' (answer is fine) for greetings, small talk, questions about the user
+    or the earlier conversation, opinions, and timeless general knowledge.
 
-        Generated Answer:
-        {answer}
+    Never answer 'no' for personal or chat-history questions.
     """
-
     prompt = ChatPromptTemplate.from_messages([
         ("system", system),
-        ("human", "\n\n query: {query} \n\n answer : {generated_answer}")
+        MessagesPlaceholder("history"),
+        ("human", "Query: {query}\n\nAnswer: {answer}")
     ])
 
-    chain = prompt | llm | StrOutputParser
+    chain = prompt | grounded_llm
 
     response = chain.invoke({
-        "query" : query,
-        "context" : generated_answer
+        "query": state["original_query"],
+        "answer": state["generation"],
+        "history": get_history(state),
     })
 
-    if response.lm_ground_answer == "yes":
-        websearch = False
-    else :
-        websearch = True
-    
-    return {
-        "websearch" : websearch
-    }
+    return {"websearch": response.grounded == "no"}
+def grounded_should_continue(state: AgentState) -> str:
 
-
-def grounded_should_continue(state : AgentState) -> AgentState:
-
-    websearch = state["websearch"]
-
-    if websearch:
+    if state["websearch"] and not state["web_search_done"]:
         return "websearch"
-    else :
-        return "end"
+    return "end"
 
+def after_websearch(state: AgentState) -> str:
+
+    if state["web_search_cancelled"]:
+        return "end"
+    return "generate"
     
-def websearch(state : AgentState):
+def websearch(state: AgentState) -> Dict:
 
     query = state["query"]
 
     decision = interrupt({
-        "action" : "Web Search",
-        "query" : query,
-        "approval" : "allow web search?"
+        "action": "Web Search",
+        "query": query,
+        "approval": "allow web search?"
     })
 
-    if decision.strip().lower() != "y" :
+    if decision.strip().lower() != "y":
         return {
-            "websearch" : False,
-            "generation" : "Web search is cancelled by user, return no answer"
+            "web_search_done": True,
+            "web_search_cancelled": True,
+            "generation": "Web search was cancelled, so I can't answer this one."
         }
-    
-    else:
-        result = asyncio.run(tavily_search(query))
-    
+
+    result = asyncio.run(tavily_search(query))
+
     return {
-        "websearch_context" : result
+        "websearch_context": result,
+        "web_search_done": True
     }
 
 
@@ -370,11 +376,22 @@ graph.add_conditional_edges(
     }
 )
 graph.add_edge("rewriter" , "generate")
+
+graph.add_edge("generate", "grounded")
+
 graph.add_conditional_edges(
-    "generate",
+    "grounded",
     grounded_should_continue,
     {
         "websearch" : "web_search",
+        "end" : END
+    }
+)
+graph.add_conditional_edges(
+    "web_search",
+    after_websearch,
+    {
+        "generate" : "generate",
         "end" : END
     }
 )
@@ -399,27 +416,28 @@ Nexus = graph.compile(checkpointer = checkpointer)
 
 if  __name__ == "__main__":
 
+    config = {"configurable" :{
+            "thread_id" : str(uuid.uuid4())
+            }
+        }
+
     while True:
         user_input =  input("Ask Anything : ")
-        if user_input.strip().lower() == "exit" or "end":
+        if user_input.strip().lower() in ("exit", "end"):
             break
     
         
         inputs = {
-            "original_query" : user_input,
-            "query" : user_input,
-            "generation" : "",
-            "websearch" : False,
-            "websearch_context" : "",
-            "validate_query" : False,
-            "grounded_answer" : False,
-            "guardrail" : False,
-        }
+        "messages": [HumanMessage(content=user_input)],
+        "original_query": user_input,
+        "query": user_input,
+        "generation": "",
+        "websearch": False,
+        "websearch_context": "",
+        "web_search_done": False,
+        "web_search_cancelled": False,
+    }
 
-        config = {"configurable" :{
-            "thread_id" : str(uuid.uuid4())
-            }
-        }
 
         while True:
 
@@ -428,8 +446,8 @@ if  __name__ == "__main__":
                 config=config
             )
 
-            if "__interrupt" not in result:
-                print(f"/n {result["generation"]}")
+            if "__interrupt__" not in result:
+                print(f"Nexus : {result["generation"]}")
                 break
             
 

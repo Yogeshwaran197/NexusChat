@@ -1,4 +1,3 @@
-from langchain_mcp_adapters import client
 import os
 import asyncio
 import json
@@ -41,11 +40,6 @@ async def tavily_search(query :str):
 
     return context
 
-
-if __name__ == "__main__":
-
-    query = input("ask : ")
-    asyncio.run(tavily_search(query))
 
 
     
