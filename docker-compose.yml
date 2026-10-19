@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: yogi
+      POSTGRES_PASSWORD: VZNpePhwcVasZoPPn5C1XbYBJgRR7uqs
+      POSTGRES_DB: nexusdb_j60j
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexuschat}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # overrides any DATABASE_URL coming from .env
+      DATABASE_URL: postgresql://yogi:VZNpePhwcVasZoPPn5C1XbYBJgRR7uqs@dpg-dbaecudg1s2s73bpr3v0-a.oregon-postgres.render.com/nexusdb_j60j
+    stdin_open: true
+    tty: true
+
+volumes:
+  pgdata:

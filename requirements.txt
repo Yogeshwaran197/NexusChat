@@ -15,5 +15,6 @@ mcp
 psycopg[binary,pool]
 
 # Utilities
+datetime
 python-dotenv
-datatime
+pydantic
